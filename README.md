@@ -129,4 +129,4 @@ See [Evaluation Protocol](docs/evaluation.md) for sampling settings, optimizatio
 
 ## License
 
-License selection is pending.
+This repository is licensed under the [MIT License](LICENSE), including the source code, model weights, and reference data provided here.
