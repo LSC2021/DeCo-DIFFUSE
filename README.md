@@ -1,22 +1,65 @@
 # DeCo-DIFFUSE
 
-Inference and surrogate-based optimization evaluation for generative inverse design of an LCE-driven elephant-trunk soft robot.
+Generative inverse design of LCE-driven soft robots with compositional diffusion and actuation optimization.
 
-This release contains the final Bi-LSTM surrogate and conditional diffusion architectures, inference-only model weights, constrained design generation, differential-evolution (DE) temperature optimization, benchmark targets, and saved reference samples. Training code, training datasets, plotting code, and finite-element validation are outside this release.
+## Overview
 
-## Setup
+Designing a soft robot for a prescribed deformation requires choosing both its geometry and its actuation. Multiple geometries may produce similar responses, while a single geometry may need to satisfy several target postures under different actuation conditions.
 
-Use Python 3.10 or newer. Install PyTorch for your CPU/CUDA platform, then install the remaining dependencies:
+**DeCo-DIFFUSE** combines a posture-conditioned diffusion model with a Bi-LSTM forward surrogate and differential-evolution temperature optimization. The diffusion model generates candidate fiber geometries from target postures. Compositional sampling accommodates multiple postures or trajectory frames, and geometric projection enforces design constraints. For each candidate geometry, temperature optimization finds actuation settings that minimize the surrogate-predicted posture error.
+
+The repository provides three benchmark tasks:
+
+1. **Single-posture design:** generate geometries for one target posture.
+2. **Multi-posture design:** find a shared geometry that achieves three target postures with different temperatures.
+3. **Trajectory design:** find a shared geometry and a sequence of temperatures for an ordered set of target frames.
+
+Pretrained models, benchmark targets, evaluation code, and reference designs are included. Evaluation uses the forward surrogate; finite-element validation is outside the scope of this repository.
+
+## Repository Structure
+
+```text
+.
+├── models/
+│   ├── lstm.py                     # Bi-LSTM forward surrogate
+│   └── cfg_diffusion.py            # Conditional geometry diffusion model
+├── validation/
+│   ├── design_generation_utils.py # Sampling and geometry projection
+│   └── opt_utils.py               # Parameter conversion and DE optimization
+├── checkpoints/
+│   ├── surrogate.pt               # Pretrained forward surrogate
+│   └── diffusion.pt               # Pretrained diffusion model
+├── targets/
+│   ├── single.json                # 30 single-posture targets
+│   ├── three.json                 # 15 three-posture sets
+│   └── trajectory.json            # 7 trajectories
+├── reference/                     # Geometry, temperatures, and MSE per design
+├── scripts/
+│   └── evaluate.py                # Generation, verification, and comparison
+├── runtime.py                     # Model loading and diffusion schedule
+├── docs/evaluation.md             # Evaluation protocol and data conventions
+├── requirements.txt
+├── requirements-tested.txt
+└── VALIDATION.md                  # Verified reference metrics and environment
+```
+
+## Installation
+
+Clone the repository and install the dependencies in a Python 3.10+ environment:
 
 ```bash
+git clone https://github.com/LSC2021/DeCo-DIFFUSE.git
+cd DeCo-DIFFUSE
 python -m pip install -r requirements.txt
 ```
 
-The exact locally tested versions are recorded in `VALIDATION.md` and pinned in `requirements-tested.txt`. CUDA is recommended for full evaluation; CPU execution is supported. Run commands from this directory. Input assets are resolved relative to the code, independent of the shell's working directory. Output paths are relative to the shell's working directory.
+CUDA is recommended for full evaluation; CPU execution is also supported. Install the appropriate PyTorch build for your hardware. The versions used for validation are listed in [requirements-tested.txt](requirements-tested.txt).
 
-## Verify the saved samples
+## Quick Start
 
-Recompute surrogate predictions at the released geometries and temperatures, without rerunning generation or optimization:
+### 1. Verify the reference designs
+
+Recompute surrogate errors for the provided geometries and optimized temperatures:
 
 ```bash
 python scripts/evaluate.py verify --task single
@@ -24,62 +67,66 @@ python scripts/evaluate.py verify --task three
 python scripts/evaluate.py verify --task trajectory
 ```
 
-Use `--limit 1` for a quick check. The report includes success rate, median and p90 maximum posture MSE, maximum difference between saved and recomputed MSE, and geometric feasibility. A maximum MSE difference below `1e-5` is a numerical sanity check, not a guarantee of bitwise agreement or identical classification for samples near the success threshold.
+For a quick check, add `--limit 1` to evaluate only the first target. No design generation or optimization is needed for this step.
 
-## Generate designs and optimize temperatures
+### 2. Generate and optimize new designs
+
+Run the task of interest:
 
 ```bash
+# Single-posture design
 python scripts/evaluate.py generate --task single --output results/single.json
+
+# Three-posture design
 python scripts/evaluate.py generate --task three --output results/three.json
+
+# Trajectory design
 python scripts/evaluate.py generate --task trajectory --output results/trajectory.json
 ```
 
-Defaults: 100 designs per target, guidance 1.0, full 500-step diffusion schedule, constraint projection, DE population size 90 and maximum 200 generations. Multi-posture and trajectory generation uses ULA with 10 correction steps and gamma 0.5. Three-posture temperatures are optimized independently. Trajectory optimization warm-starts each frame from the preceding temperatures and adds `5e-4 * ||t - t_previous||^2` to its objective; reported MSE excludes this penalty. Temperature ordering is `t3 >= t2`.
+Each command generates 100 designs per target and optimizes their actuation temperatures. Results contain the geometry, temperatures, and surrogate MSE for each design.
 
-For an inexpensive execution check:
+To check execution with a smaller optimization budget:
 
 ```bash
-python scripts/evaluate.py generate --task single --limit 1 --samples 1 --maxiter 1 --device cpu --output results/smoke.json
+python scripts/evaluate.py generate --task single --limit 1 --samples 1 --maxiter 1 --device cpu --output results/example.json
 ```
 
-This reduced optimization budget is not the benchmark protocol. Full evaluation can take substantial time. Completed targets are saved atomically after each target; automatic resume is not implemented. Existing output files are protected from overwriting.
+This short run checks the workflow; it does not reproduce benchmark performance.
 
-Each run uses fresh random states unless the user supplies `--seed` for their own experiment. Independent runs can produce different designs, temperatures, and metrics. Optional user seeds support repeatability within a compatible environment; different hardware or library versions can still alter numerical results.
-
-## Compare a new run with reference samples
+### 3. Compare with the reference results
 
 ```bash
 python scripts/evaluate.py compare --task single --input results/single.json
 ```
 
-The comparison reports descriptive statistics on matching target IDs. For a meaningful benchmark comparison, use the full target set and the default optimization budget and guidance. Repeated independent runs and target-level uncertainty estimates are preferable to treating individual generated designs as independent observations. Similar distributions must be assessed empirically; this script does not establish statistical equivalence. Historical reference samples are fixed observations, not outputs expected to match a new run design by design.
+The report compares success rates, error quantiles, and per-target success rates. New runs use fresh random states by default, so generated designs and metrics may differ from the reference samples. Use `--seed` to specify a seed for your own run.
 
-## Data schema and units
+## Pretrained Models
 
-- `targets/{single,three,trajectory}.json`: 30 single-posture targets, 15 three-posture sets, and 7 trajectories. Each entry has `target_id` and `postures` of shape `(K, 100, 3)`. Coordinates are normalized by 100 mm and are already in the model's coordinate convention. Preserve node order and do not renormalize them.
-- `reference/*.json`: `task`, `guidance`, and `results`. Each target contains `designs`, each with `geometry` (6 values), `temperatures` (`K x 3`), and `mse` (`K` values). Only final samples and their pure surrogate MSE are included.
-- Geometry order: `[h3, theta1, theta3, beta31, beta32, delta3]`. Multiply elementwise by `[1, 100, 100, 360, 360, 180]` for the physical convention (h3 is a height fraction; remaining parameters are angles in degrees).
-- Temperature values are normalized: `T_C = 20 + 120 * t`.
-- Diffusion operates internally in `[-1, 1]^6`; released sample geometry uses `DEFAULT_GEOM_BOUNDS`, not diffusion coordinates. Conversion is performed by `remap`.
-- `par2sig` converts the six geometry and three temperature parameters to the surrogate's `(100, 6)` signal representation.
-- MSE is averaged over all 100 nodes and three coordinates. A design succeeds if its **maximum** MSE over the target postures/frames is strictly less than `1e-3`. Aggregate success is the mean of per-target design success rates. Reported median/p90 describe per-design maximum MSE.
+Both pretrained models are included as inference-only PyTorch state dictionaries:
 
-The reference samples use guidance 1.0. Model files contain tensor state dictionaries only.
+| Model | Checkpoint | Role |
+|---|---|---|
+| Bi-LSTM surrogate | `checkpoints/surrogate.pt` | Predict posture from geometry and temperatures |
+| Conditional diffusion | `checkpoints/diffusion.pt` | Generate geometry conditioned on target postures |
 
-## Scope of the evidence
+Training code and training datasets are not included. All examples run directly with the provided weights.
 
-All success and error values in this package are **surrogate-based**. They measure agreement with the released surrogate and do not establish agreement with an independent finite-element solver or physical experiment. Abaqus models, simulation results, and FEA verification are not included. The package supports recomputation of saved-sample surrogate errors and independent generation plus temperature optimization. It does not support retraining or exact replay of historical stochastic runs.
+## Reproducing the Reference Results
 
-## Layout
+The reference set contains 100 designs per target, for a total of 5,200 designs. A design succeeds when its maximum surrogate MSE across the required postures or frames is below `1e-3`.
 
-```text
-models/          Final network architectures
-validation/      Geometry sampling, projection, and optimization utilities
-checkpoints/     Inference-only tensor state dictionaries
-runtime.py       Independent model and diffusion-schedule loading
-scripts/         Readable evaluation entry point
-targets/        Benchmark target postures
-reference/       Released final samples
-```
+| Task | Targets | Reference designs | Success rate | Verification command |
+|---|---:|---:|---:|---|
+| Single posture | 30 | 3,000 | 96.87% | `python scripts/evaluate.py verify --task single` |
+| Three postures | 15 | 1,500 | 93.60% | `python scripts/evaluate.py verify --task three` |
+| Trajectory | 7 | 700 | 88.57% | `python scripts/evaluate.py verify --task trajectory` |
 
-License: pending.
+These values describe the saved reference samples. Independent generation and optimization runs support statistical comparison rather than exact replay. All reported errors and success rates are **surrogate-based** and do not constitute FEA or experimental validation.
+
+See [Evaluation Protocol](docs/evaluation.md) for sampling settings, optimization parameters, data formats, units, and numerical tolerances. [Validation](VALIDATION.md) records the checks performed on the provided samples.
+
+## License
+
+License selection is pending.
